@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGameX Message Tools
 // @namespace    https://github.com/ssps6210/ogamex-select-read
-// @version      1.2.0
+// @version      1.2.1
 // @description  Mark All Read + Delete Read across all tabs and pages
 // @author       ssps6210
 // @match        https://*.ogamex.dev/*
@@ -87,10 +87,16 @@
             const ids   = type === 'unread' ? first.unreadIds : first.readIds;
             allIds.push(...ids);
 
+            // Early exit: if scanning for unread and this page had none, stop —
+            // messages are newest-first so later pages won't have unread either.
+            if (type === 'unread' && ids.length === 0) continue;
+
             for (let p = 2; p <= first.totalPages; p++) {
                 await delay(PAGE_MS);
-                const page = await fetchTabPage(tabUrl, p);
-                allIds.push(...(type === 'unread' ? page.unreadIds : page.readIds));
+                const page    = await fetchTabPage(tabUrl, p);
+                const pageIds = type === 'unread' ? page.unreadIds : page.readIds;
+                allIds.push(...pageIds);
+                if (type === 'unread' && pageIds.length === 0) break;
             }
         }
         // deduplicate
