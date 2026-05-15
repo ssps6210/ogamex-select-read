@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OGameX Message Tools
 // @namespace    https://github.com/ssps6210/ogamex-select-read
-// @version      1.1.0
-// @description  Mark All Read + Delete Read buttons for the messages page
+// @version      1.2.0
+// @description  Mark All Read + Delete Read across all tabs and pages
 // @author       ssps6210
 // @match        https://*.ogamex.dev/*
 // @match        http://localhost/*
@@ -14,82 +14,161 @@
 (function () {
     'use strict';
 
-    // ============================================================
-    // Only active on /messages page
-    // ============================================================
-    function onMessagesPage() {
-        return window.location.pathname.startsWith('/messages');
-    }
+    const BATCH   = 5;    // parallel mark-read requests
+    const PAGE_MS = 100;  // delay between page fetches
+    const MSG_MS  = 60;   // delay between individual mark-read calls in a batch
 
     // ============================================================
-    // CSRF token
+    // CSRF
     // ============================================================
     function getCSRF() {
-        const m = document.querySelector('meta[name="csrf-token"]');
-        return m ? m.getAttribute('content') : null;
+        return document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') ?? null;
+    }
+    function saveCSRF(token) {
+        if (!token) return;
+        document.querySelector('meta[name="csrf-token"]')?.setAttribute('content', token);
     }
 
     // ============================================================
-    // Mark all unread messages as read (fetch each to trigger server-side mark)
+    // Collect all tab URLs from the DOM (subtabs take priority)
+    // ============================================================
+    function getTabUrls() {
+        const seen = new Set();
+        const urls = [];
+        const links = document.querySelectorAll('.subtabs a[href*="/ajax/messages"], .js_tabs a[href*="/ajax/messages"]');
+        for (const a of links) {
+            const href = a.getAttribute('href');
+            if (href && !seen.has(href)) { seen.add(href); urls.push(href); }
+        }
+        return urls;
+    }
+
+    // ============================================================
+    // Parse total pages from fetched HTML
+    // Handles: "1 / 72", "1/72", etc.
+    // ============================================================
+    function parseTotalPages(html) {
+        const m = html.match(/\d+\s*\/\s*(\d+)/);
+        return m ? parseInt(m[1]) : 1;
+    }
+
+    // ============================================================
+    // Fetch one tab page and return { unreadIds, readIds, totalPages }
+    // ============================================================
+    async function fetchTabPage(tabUrl, page) {
+        const sep = tabUrl.includes('?') ? '&' : '?';
+        const url = `${tabUrl}${sep}pagination=${page}`;
+        const res = await fetch(url, { credentials: 'same-origin' });
+        const html = await res.text();
+
+        const parser   = new DOMParser();
+        const doc      = parser.parseFromString(html, 'text/html');
+        const unreadIds = [...doc.querySelectorAll('li.msg.msg_new[data-msg-id]')]
+                            .map(el => el.dataset.msgId);
+        const readIds   = [...doc.querySelectorAll('li.msg:not(.msg_new)[data-msg-id]')]
+                            .map(el => el.dataset.msgId);
+        const totalPages = parseTotalPages(html);
+        return { unreadIds, readIds, totalPages };
+    }
+
+    // ============================================================
+    // Collect all unread (or read) IDs across all tabs and pages
+    // ============================================================
+    async function collectIds(type = 'unread') {
+        const tabUrls = getTabUrls();
+        if (!tabUrls.length) {
+            setLog('⚠ No tabs found in DOM');
+            return [];
+        }
+
+        const allIds = [];
+        for (const tabUrl of tabUrls) {
+            const first = await fetchTabPage(tabUrl, 1);
+            const ids   = type === 'unread' ? first.unreadIds : first.readIds;
+            allIds.push(...ids);
+
+            for (let p = 2; p <= first.totalPages; p++) {
+                await delay(PAGE_MS);
+                const page = await fetchTabPage(tabUrl, p);
+                allIds.push(...(type === 'unread' ? page.unreadIds : page.readIds));
+            }
+        }
+        // deduplicate
+        return [...new Set(allIds)];
+    }
+
+    // ============================================================
+    // Mark one message as read by fetching it
+    // ============================================================
+    async function markRead(id) {
+        await fetch(`/ajax/messages/${id}`, { credentials: 'same-origin' });
+        document.querySelector(`li.msg.msg_new[data-msg-id="${id}"]`)?.classList.remove('msg_new');
+    }
+
+    // ============================================================
+    // Delete one message via action 103
+    // ============================================================
+    async function deleteMsg(id) {
+        const body = new FormData();
+        body.append('_token',    getCSRF());
+        body.append('messageId', id);
+        body.append('action',    103);
+        body.append('ajax',      1);
+        const res  = await fetch('/messages', {
+            method: 'POST',
+            headers: { 'X-Requested-With': 'XMLHttpRequest' },
+            credentials: 'same-origin',
+            body,
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data.newAjaxToken) saveCSRF(data.newAjaxToken);
+        document.querySelector(`li.msg[data-msg-id="${id}"]`)?.remove();
+    }
+
+    // ============================================================
+    // Run fn on ids in parallel batches
+    // ============================================================
+    async function runBatched(ids, fn, labelPrefix) {
+        let done = 0;
+        for (let i = 0; i < ids.length; i += BATCH) {
+            const batch = ids.slice(i, i + BATCH);
+            await Promise.all(batch.map(id => fn(id)));
+            done += batch.length;
+            setLog(`${labelPrefix} ${done}/${ids.length}…`);
+            if (i + BATCH < ids.length) await delay(MSG_MS);
+        }
+    }
+
+    // ============================================================
+    // Button handlers
     // ============================================================
     async function markAllRead() {
-        const unread = [...document.querySelectorAll('li.msg.msg_new[data-msg-id]')];
-        if (!unread.length) { setLog('Nothing unread'); return; }
-
-        setLog(`Marking ${unread.length}…`);
-        for (let i = 0; i < unread.length; i++) {
-            const id = unread[i].dataset.msgId;
-            try {
-                await fetch(`/ajax/messages/${id}`, { credentials: 'same-origin' });
-                unread[i].classList.remove('msg_new');
-            } catch (_) {}
-            if (i < unread.length - 1) await delay(150);
-        }
-        setLog(`✅ ${unread.length} marked read`);
+        setBusy(true);
+        setLog('Scanning tabs…');
+        const ids = await collectIds('unread');
+        if (!ids.length) { setLog('Nothing unread'); setBusy(false); return; }
+        setLog(`Found ${ids.length} unread`);
+        await runBatched(ids, markRead, 'Marking');
+        setLog(`✅ ${ids.length} marked read`);
+        setBusy(false);
     }
 
-    // ============================================================
-    // Delete all read messages via action 103
-    // ============================================================
     async function deleteRead() {
-        const read = [...document.querySelectorAll('li.msg:not(.msg_new)[data-msg-id]')];
-        if (!read.length) { setLog('No read messages'); return; }
+        setBusy(true);
+        setLog('Scanning tabs…');
+        const ids = await collectIds('read');
+        if (!ids.length) { setLog('No read messages'); setBusy(false); return; }
 
-        const confirmed = confirm(`Delete ${read.length} read messages?`);
-        if (!confirmed) return;
+        const ok = confirm(`Delete ${ids.length} read messages across all tabs?`);
+        if (!ok) { setLog('Cancelled'); setBusy(false); return; }
 
-        setLog(`Deleting ${read.length}…`);
-        let deleted = 0;
-        for (let i = 0; i < read.length; i++) {
-            const id = read[i].dataset.msgId;
-            const token = getCSRF();
-            try {
-                const body = new FormData();
-                body.append('_token',    token);
-                body.append('messageId', id);
-                body.append('action',    103);
-                body.append('ajax',      1);
-                const res  = await fetch('/messages', {
-                    method: 'POST',
-                    headers: { 'X-Requested-With': 'XMLHttpRequest' },
-                    credentials: 'same-origin',
-                    body,
-                });
-                const data = await res.json().catch(() => ({}));
-                if (data.newAjaxToken) {
-                    document.querySelector('meta[name="csrf-token"]')
-                        ?.setAttribute('content', data.newAjaxToken);
-                }
-                read[i].remove();
-                deleted++;
-            } catch (_) {}
-            if (i < read.length - 1) await delay(150);
-        }
-        setLog(`✅ Deleted ${deleted}`);
+        await runBatched(ids, deleteMsg, 'Deleting');
+        setLog(`✅ Deleted ${ids.length}`);
+        setBusy(false);
     }
 
     // ============================================================
-    // Floating widget UI
+    // Floating widget
     // ============================================================
     let _widget = null;
 
@@ -112,12 +191,12 @@
                     Delete Read
                 </button>
             </div>
-            <div id="mt-log" style="font:10px monospace;color:#888;margin-top:5px;min-height:14px;"></div>
+            <div id="mt-log" style="font:10px monospace;color:#888;margin-top:5px;min-height:14px;max-width:160px;word-break:break-word;"></div>
         `;
         div.style.cssText = `
             position:fixed; bottom:60px; right:12px; z-index:99999;
             background:rgba(0,0,0,0.88); border:1px solid #446;
-            border-radius:5px; padding:10px 14px; min-width:150px;
+            border-radius:5px; padding:10px 14px; min-width:160px;
             box-shadow:0 0 12px rgba(0,0,0,0.6);
         `;
 
@@ -128,30 +207,30 @@
         _widget = div;
     }
 
-    function removeWidget() {
-        _widget?.remove();
-        _widget = null;
-    }
+    function removeWidget() { _widget?.remove(); _widget = null; }
 
     function setLog(msg) {
         if (_widget) _widget.querySelector('#mt-log').textContent = msg;
         console.log('[MsgTools]', msg);
     }
 
+    function setBusy(busy) {
+        if (!_widget) return;
+        _widget.querySelector('#mt-mark-read').disabled   = busy;
+        _widget.querySelector('#mt-delete-read').disabled = busy;
+    }
+
     function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
     // ============================================================
-    // Show/hide based on current page
+    // Show/hide on navigation
     // ============================================================
     function update() {
-        if (onMessagesPage()) buildWidget();
+        if (window.location.pathname.startsWith('/messages')) buildWidget();
         else removeWidget();
     }
 
-    // Watch for SPA-style navigation
-    const observer = new MutationObserver(update);
-    observer.observe(document.body, { childList: true, subtree: false });
-
+    new MutationObserver(update).observe(document.body, { childList: true, subtree: false });
     window.addEventListener('popstate', update);
     update();
 })();
