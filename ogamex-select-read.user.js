@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGameX Message Tools
 // @namespace    https://github.com/ssps6210/ogamex-select-read
-// @version      1.2.1
+// @version      1.2.2
 // @description  Mark All Read + Delete Read across all tabs and pages
 // @author       ssps6210
 // @match        https://*.ogamex.dev/*
@@ -35,12 +35,18 @@
     function getTabUrls() {
         const seen = new Set();
         const urls = [];
-        const links = document.querySelectorAll('.subtabs a[href*="/ajax/messages"], .js_tabs a[href*="/ajax/messages"]');
-        for (const a of links) {
+        for (const a of document.querySelectorAll('a[href*="/ajax/messages"]')) {
             const href = a.getAttribute('href');
-            if (href && !seen.has(href)) { seen.add(href); urls.push(href); }
+            if (!href) continue;
+            // Skip individual message links (/ajax/messages/12345)
+            if (/\/ajax\/messages\/\d+/.test(href)) continue;
+            // Prefer subtab URLs; skip parent tab URLs if subtabs exist
+            const abs = new URL(href, window.location.origin).href;
+            if (!seen.has(abs)) { seen.add(abs); urls.push(abs); }
         }
-        return urls;
+        // Keep only subtab URLs if any exist, else fall back to tab URLs
+        const subtabs = urls.filter(u => u.includes('subtab='));
+        return subtabs.length ? subtabs : urls.filter(u => u.includes('tab='));
     }
 
     // ============================================================
