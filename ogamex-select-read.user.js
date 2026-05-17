@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGameX Message Tools
 // @namespace    https://github.com/ssps6210/ogamex-select-read
-// @version      1.2.2
+// @version      1.2.3
 // @description  Mark All Read + Delete Read across all tabs and pages
 // @author       ssps6210
 // @match        https://*.ogamex.dev/*
@@ -69,12 +69,12 @@
 
         const parser   = new DOMParser();
         const doc      = parser.parseFromString(html, 'text/html');
-        const unreadIds = [...doc.querySelectorAll('li.msg.msg_new[data-msg-id]')]
-                            .map(el => el.dataset.msgId);
-        const readIds   = [...doc.querySelectorAll('li.msg:not(.msg_new)[data-msg-id]')]
-                            .map(el => el.dataset.msgId);
+        const allMsgs   = [...doc.querySelectorAll('li.msg[data-msg-id]')];
+        const unreadIds = allMsgs.filter(el => el.classList.contains('msg_new')).map(el => el.dataset.msgId);
+        const readIds   = allMsgs.filter(el => !el.classList.contains('msg_new')).map(el => el.dataset.msgId);
+        const allIds    = allMsgs.map(el => el.dataset.msgId);
         const totalPages = parseTotalPages(html);
-        return { unreadIds, readIds, totalPages };
+        return { unreadIds, readIds, allIds, totalPages };
     }
 
     // ============================================================
@@ -90,19 +90,30 @@
         const allIds = [];
         for (const tabUrl of tabUrls) {
             const first = await fetchTabPage(tabUrl, 1);
-            const ids   = type === 'unread' ? first.unreadIds : first.readIds;
-            allIds.push(...ids);
 
-            // Early exit: if scanning for unread and this page had none, stop —
-            // messages are newest-first so later pages won't have unread either.
-            if (type === 'unread' && ids.length === 0) continue;
-
-            for (let p = 2; p <= first.totalPages; p++) {
-                await delay(PAGE_MS);
-                const page    = await fetchTabPage(tabUrl, p);
-                const pageIds = type === 'unread' ? page.unreadIds : page.readIds;
-                allIds.push(...pageIds);
-                if (type === 'unread' && pageIds.length === 0) break;
+            if (type === 'unread') {
+                if (first.unreadIds.length > 0) {
+                    // Tab uses msg_new — scan pages with early exit
+                    allIds.push(...first.unreadIds);
+                    for (let p = 2; p <= first.totalPages; p++) {
+                        await delay(PAGE_MS);
+                        const page = await fetchTabPage(tabUrl, p);
+                        allIds.push(...page.unreadIds);
+                        if (page.unreadIds.length === 0) break;
+                    }
+                } else if (first.allIds.length > 0) {
+                    // Tab has no msg_new (e.g. combat reports) —
+                    // mark all on page 1 as read and stop
+                    allIds.push(...first.allIds);
+                }
+            } else {
+                allIds.push(...first.readIds);
+                for (let p = 2; p <= first.totalPages; p++) {
+                    await delay(PAGE_MS);
+                    const page = await fetchTabPage(tabUrl, p);
+                    allIds.push(...page.readIds);
+                    if (page.readIds.length === 0) break;
+                }
             }
         }
         // deduplicate
