@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGameX Message Tools
 // @namespace    https://github.com/ssps6210/ogamex-select-read
-// @version      1.2.3
+// @version      1.2.4
 // @description  Mark All Read + Delete Read across all tabs and pages
 // @author       ssps6210
 // @match        https://*.ogamex.dev/*
@@ -103,8 +103,13 @@
                     }
                 } else if (first.allIds.length > 0) {
                     // Tab has no msg_new (e.g. combat reports) —
-                    // mark all on page 1 as read and stop
+                    // mark all messages on first 3 pages as read
                     allIds.push(...first.allIds);
+                    for (let p = 2; p <= Math.min(3, first.totalPages); p++) {
+                        await delay(PAGE_MS);
+                        const page = await fetchTabPage(tabUrl, p);
+                        allIds.push(...page.allIds);
+                    }
                 }
             } else {
                 allIds.push(...first.readIds);
