@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGameX Message Tools
 // @namespace    https://github.com/ssps6210/ogamex-select-read
-// @version      1.2.4
+// @version      1.3.0
 // @description  Mark All Read + Delete Read across all tabs and pages
 // @author       ssps6210
 // @match        https://*.ogamex.dev/*
@@ -30,30 +30,92 @@
     }
 
     // ============================================================
-    // Collect all tab URLs from the DOM (subtabs take priority)
+    // Collect all tab URLs to scan.
+    //
+    // Bug fixed: the old logic returned ONLY subtab URLs when any
+    // subtab was found in the DOM, silently skipping Economy,
+    // Universe, System, and Favorites (which have no subtabs and
+    // must be addressed via their main tab URL). It also missed
+    // Communication subtabs when that tab hadn't been opened yet.
+    //
+    // New logic:
+    //   1. Collect all /ajax/messages links currently in the DOM.
+    //   2. For each main tab whose subtabs ARE already in the DOM,
+    //      use those subtab URLs (skip the parent tab URL).
+    //   3. For each main tab whose subtabs are NOT in the DOM yet,
+    //      fetch that tab URL once to discover subtabs dynamically.
+    //      If the response contains subtab links → use those.
+    //      If not (Economy / Universe / System / Favorites) → use
+    //      the main tab URL directly (it returns messages directly).
     // ============================================================
-    function getTabUrls() {
+    async function getTabUrls() {
         const seen = new Set();
-        const urls = [];
+        const domUrls = [];
         for (const a of document.querySelectorAll('a[href*="/ajax/messages"]')) {
             const href = a.getAttribute('href');
             if (!href) continue;
-            // Skip individual message links (/ajax/messages/12345)
             if (/\/ajax\/messages\/\d+/.test(href)) continue;
-            // Prefer subtab URLs; skip parent tab URLs if subtabs exist
             const abs = new URL(href, window.location.origin).href;
-            if (!seen.has(abs)) { seen.add(abs); urls.push(abs); }
+            if (!seen.has(abs)) { seen.add(abs); domUrls.push(abs); }
         }
-        // Keep only subtab URLs if any exist, else fall back to tab URLs
-        const subtabs = urls.filter(u => u.includes('subtab='));
-        return subtabs.length ? subtabs : urls.filter(u => u.includes('tab='));
+        if (!domUrls.length) return [];
+
+        // Subtab URLs already present in the DOM (from whatever tab is active)
+        const domSubtabs = domUrls.filter(u => u.includes('subtab='));
+        const tabsWithSubtabsInDom = new Set(
+            domSubtabs.map(u => new URL(u).searchParams.get('tab'))
+        );
+
+        const result = [...domSubtabs];
+        domSubtabs.forEach(u => seen.add(u));
+
+        // For each main tab link, decide whether to use the tab URL or fetch subtabs
+        const mainTabUrls = domUrls.filter(u => u.includes('tab=') && !u.includes('subtab='));
+        for (const tabUrl of mainTabUrls) {
+            const tabKey = new URL(tabUrl).searchParams.get('tab');
+            if (tabsWithSubtabsInDom.has(tabKey)) continue; // subtabs already covered
+
+            // Fetch the tab to discover its structure
+            const res  = await fetch(tabUrl, { credentials: 'same-origin' });
+            const html = await res.text();
+            const doc  = new DOMParser().parseFromString(html, 'text/html');
+
+            const subLinks = [...doc.querySelectorAll('a[href*="subtab="]')]
+                .map(a => new URL(a.getAttribute('href'), window.location.origin).href)
+                .filter(u => !seen.has(u));
+
+            if (subLinks.length > 0) {
+                // Tab has subtabs (e.g. Communication) — use those
+                subLinks.forEach(u => { seen.add(u); result.push(u); });
+            } else {
+                // No subtabs (Economy / Universe / System / Favorites) —
+                // the tab URL itself returns messages directly
+                if (!seen.has(tabUrl)) { seen.add(tabUrl); result.push(tabUrl); }
+            }
+        }
+
+        return result;
     }
 
     // ============================================================
-    // Parse total pages from fetched HTML
-    // Handles: "1 / 72", "1/72", etc.
+    // Parse total pages from fetched HTML.
+    //
+    // Bug fixed: the old regex matched the first "N/M" pattern in
+    // the entire HTML, which could be a false match from message
+    // body content appearing before the pagination element.
+    //
+    // New logic: prefer the DOM's <li class="curPage"> element
+    // (OGameX renders "currentPage/totalPages" there), fall back
+    // to the raw regex only if the element isn't found.
     // ============================================================
     function parseTotalPages(html) {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        const curPage = doc.querySelector('li.curPage');
+        if (curPage) {
+            const m = curPage.textContent.match(/\d+\s*\/\s*(\d+)/);
+            if (m) return parseInt(m[1]);
+        }
+        // Fallback for any template variant that renders it differently
         const m = html.match(/\d+\s*\/\s*(\d+)/);
         return m ? parseInt(m[1]) : 1;
     }
@@ -67,8 +129,7 @@
         const res = await fetch(url, { credentials: 'same-origin' });
         const html = await res.text();
 
-        const parser   = new DOMParser();
-        const doc      = parser.parseFromString(html, 'text/html');
+        const doc      = new DOMParser().parseFromString(html, 'text/html');
         const allMsgs   = [...doc.querySelectorAll('li.msg[data-msg-id]')];
         const unreadIds = allMsgs.filter(el => el.classList.contains('msg_new')).map(el => el.dataset.msgId);
         const readIds   = allMsgs.filter(el => !el.classList.contains('msg_new')).map(el => el.dataset.msgId);
@@ -81,7 +142,7 @@
     // Collect all unread (or read) IDs across all tabs and pages
     // ============================================================
     async function collectIds(type = 'unread') {
-        const tabUrls = getTabUrls();
+        const tabUrls = await getTabUrls();   // now async
         if (!tabUrls.length) {
             setLog('⚠ No tabs found in DOM');
             return [];
