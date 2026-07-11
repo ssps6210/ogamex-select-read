@@ -46,6 +46,9 @@ This means you do **not** need to manually open each tab before clicking — the
 
 ## Changelog
 
+### 1.3.1
+- Fixed: already-read messages were incorrectly counted as unread — the fallback logic that marked all messages on first 3 pages was wrong; OGameX uses `msg_new` consistently for all message types so a tab with no `msg_new` items simply has nothing unread
+
 ### 1.3.0
 - Fixed: Economy, Universe, System, Favorites, and Communication tabs were silently skipped when Fleet subtabs were already loaded in the DOM
 - Fixed: page count detection now uses the `li.curPage` DOM element instead of a raw regex, preventing false matches from message body content

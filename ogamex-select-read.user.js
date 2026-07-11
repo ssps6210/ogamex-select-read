@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OGameX Message Tools
 // @namespace    https://github.com/ssps6210/ogamex-select-read
-// @version      1.3.0
+// @version      1.3.1
 // @description  Mark All Read + Delete Read across all tabs and pages
 // @author       ssps6210
 // @match        https://*.ogamex.dev/*
@@ -153,23 +153,16 @@
             const first = await fetchTabPage(tabUrl, 1);
 
             if (type === 'unread') {
+                // OGameX always adds msg_new for unread messages across all
+                // message types (espionage, combat, expeditions, etc.).
+                // If a tab page has no msg_new, it has no unread → skip it.
                 if (first.unreadIds.length > 0) {
-                    // Tab uses msg_new — scan pages with early exit
                     allIds.push(...first.unreadIds);
                     for (let p = 2; p <= first.totalPages; p++) {
                         await delay(PAGE_MS);
                         const page = await fetchTabPage(tabUrl, p);
                         allIds.push(...page.unreadIds);
                         if (page.unreadIds.length === 0) break;
-                    }
-                } else if (first.allIds.length > 0) {
-                    // Tab has no msg_new (e.g. combat reports) —
-                    // mark all messages on first 3 pages as read
-                    allIds.push(...first.allIds);
-                    for (let p = 2; p <= Math.min(3, first.totalPages); p++) {
-                        await delay(PAGE_MS);
-                        const page = await fetchTabPage(tabUrl, p);
-                        allIds.push(...page.allIds);
                     }
                 }
             } else {
